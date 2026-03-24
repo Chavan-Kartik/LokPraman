@@ -1,0 +1,728 @@
+import { useState, useEffect, useRef } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { ArrowLeft, X, ChevronRight, ImageIcon } from 'lucide-react';
+import { DashboardLayout } from '../components/DashboardLayout';
+import { Button } from '../components/ui/Button';
+import { CustomScrollbar } from '../components/ui/CustomScrollbar';
+import { ImageWithBoundingBox } from '../components/ui/ImageWithBoundingBox';
+import { tasksAPI, type Task } from '../services/api';
+import toast from 'react-hot-toast';
+
+interface CapturedImage {
+    id: string;
+    src: string;
+    timestamp: Date;
+    status: 'pending' | 'analyzing' | 'pass' | 'fail' | 'na';
+    mediaType: 'image' | 'video';
+    file?: File;  // Keep original file for upload
+}
+
+export const WorkVerification = () => {
+    const { id } = useParams<{ id: string }>();
+    const navigate = useNavigate();    const fileInputRef = useRef<HTMLInputElement>(null);
+
+    const [task, setTask] = useState<Task | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [capturedImages, setCapturedImages] = useState<CapturedImage[]>([]);
+    const [selectedImageIndex, setSelectedImageIndex] = useState<number | null>(null);
+    const [viewMode, setViewMode] = useState<'before' | 'after' | 'ai'>('after');
+    const [submitting, setSubmitting] = useState(false);
+    const [aiResults, setAiResults] = useState<any>(null);
+    const [activeTab, setActiveTab] = useState<'reference' | 'verification' | 'ai'>('verification');
+
+    // Fetch task details
+    useEffect(() => {
+        const fetchTask = async () => {
+            if (!id) return;
+            try {
+                const response = await tasksAPI.getTask(id);
+                const taskData = response.data;
+                setTask(taskData);
+
+                // Load existing AI results if they exist
+                if (taskData.aiVerification) {
+                    console.log('[WorkVerification] Loading existing AI results');
+                    setAiResults(taskData.aiVerification);
+                    // Switch to AI view if results exist
+                    if (taskData.aiVerification.details?.length > 0) {
+                        setViewMode('ai');
+                        setSelectedImageIndex(0);
+                        setActiveTab('ai');
+                    }
+                }
+
+                // Load worker-uploaded images if they exist
+                if (taskData.workerImages && taskData.workerImages.length > 0) {
+                    console.log('[WorkVerification] Loading worker-uploaded images:', taskData.workerImages.length);
+                    const workerUploadedImages: CapturedImage[] = taskData.workerImages.map((url: string, index: number) => ({
+                        id: `worker_${index}`,
+                        src: url,
+                        timestamp: new Date(taskData.workerImagesUploadedAt || new Date()),
+                        status: 'pending' as const,
+                        mediaType: 'image' as const,
+                    }));
+                    setCapturedImages(workerUploadedImages);
+                    setActiveTab('verification');
+                }
+                // Fallback: Load single after image if no worker images
+                else if (taskData.afterImageUrl) {
+                    console.log('[WorkVerification] Loading uploaded after images');
+                    const uploadedImage: CapturedImage = {
+                        id: 'uploaded_1',
+                        src: taskData.afterImageUrl,
+                        timestamp: new Date(taskData.completedAt || new Date()),
+                        status: 'pass',
+                        mediaType: 'image'
+                    };
+                    setCapturedImages([uploadedImage]);
+                    if (!taskData.aiVerification) {
+                        setActiveTab('verification');
+                    }
+                }
+            } catch (error) {
+                console.error('Failed to fetch task:', error);
+                toast.error('Failed to load task');
+                navigate('/dashboard');
+            } finally {
+                setLoading(false);
+            }
+        };
+        fetchTask();
+    }, [id, navigate]);
+
+    // Handle file upload
+    const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const files = e.target.files;
+        if (!files) return;
+
+        const filesArray = Array.from(files);
+        let processedCount = 0;
+
+        // Video file extensions
+        const videoExtensions = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'];
+        const isVideoFile = (filename: string) => {
+            const ext = filename.toLowerCase().slice(filename.lastIndexOf('.'));
+            return videoExtensions.includes(ext);
+        };
+
+        filesArray.forEach((file) => {
+            const mediaType = isVideoFile(file.name) ? 'video' : 'image';
+
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                const newMedia: CapturedImage = {
+                    id: `${mediaType}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                    src: event.target?.result as string,
+                    timestamp: new Date(),
+                    status: 'pending',
+                    mediaType: mediaType,
+                    file: file  // Keep original file for upload
+                };
+                setCapturedImages(prev => {
+                    const updated = [...prev, newMedia];
+                    processedCount++;
+                    if (processedCount === filesArray.length) {
+                        setViewMode('after');
+                        setSelectedImageIndex(updated.length - 1);
+                    }
+                    return updated;
+                });
+            };
+            reader.readAsDataURL(file);
+        });
+
+        if (fileInputRef.current) {
+            fileInputRef.current.value = '';
+        }
+    };
+
+    // Remove captured image
+    const removeImage = (imageId: string) => {
+        setCapturedImages(prev => prev.filter(img => img.id !== imageId));
+        if (selectedImageIndex !== null) {
+            setSelectedImageIndex(null);
+        }
+    };
+
+    // Submit work for verification
+    const handleSubmitWork = async () => {
+        console.log('[WorkVerification] handleSubmitWork called');
+        console.log('[WorkVerification] capturedImages:', capturedImages.length);
+
+        if (capturedImages.length === 0) {
+            toast.error('Please upload at least one image or video');
+            return;
+        }
+
+        // Note: Backend now handles all status transitions automatically
+
+        setSubmitting(true);
+        try {
+            const formData = new FormData();
+
+            for (let i = 0; i < capturedImages.length; i++) {
+                const media = capturedImages[i];
+                console.log(`[WorkVerification] Processing ${media.mediaType} ${i}: ${media.src.substring(0, 50)}...`);
+
+                // Use original file if available (important for videos), otherwise create from blob
+                if (media.file) {
+                    console.log(`[WorkVerification] Using original file: ${media.file.name}, type=${media.file.type}, size=${media.file.size}`);
+                    formData.append('afterImages', media.file);
+                } else {
+                    // Fallback for images loaded from backend
+                    const response = await fetch(media.src);
+                    const blob = await response.blob();
+                    console.log(`[WorkVerification] Blob created: type=${blob.type}, size=${blob.size}`);
+                    const ext = media.mediaType === 'video' ? 'mp4' : 'jpg';
+                    const file = new File([blob], `after_${i}.${ext}`, { type: blob.type });
+                    formData.append('afterImages', file);
+                }
+            }
+
+            // Log FormData contents
+            console.log('[WorkVerification] FormData entries:');
+            for (const pair of formData.entries()) {
+                console.log(`  ${pair[0]}: ${pair[1]}`);
+            }
+
+            // Use native fetch instead of axios
+            const token = localStorage.getItem('token');
+            const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+
+            console.log(`[WorkVerification] Sending to: ${apiUrl}/v0/tasks/${id}/submit`);
+
+            const fetchResponse = await fetch(`${apiUrl}/v0/tasks/${id}/submit`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                },
+                body: formData,
+            });
+
+            console.log(`[WorkVerification] Response status: ${fetchResponse.status}`);
+
+            if (!fetchResponse.ok) {
+                const errorText = await fetchResponse.text();
+                console.error('[WorkVerification] Error response:', errorText);
+                throw new Error(`HTTP ${fetchResponse.status}: ${errorText}`);
+            }
+
+            const data = await fetchResponse.json();
+            toast.success('Work submitted and verified!');
+            setAiResults(data.aiResult);
+            // Switch to AI view mode automatically
+            if (data.aiResult?.details?.length > 0) {
+                setViewMode('ai');
+                setSelectedImageIndex(0);
+                setActiveTab('ai');
+            }
+        } catch (error) {
+            console.error('Submit error:', error);
+            toast.error('Failed to submit work');
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
+
+
+    const getStatusBadge = (status: CapturedImage['status']) => {
+        switch (status) {
+            case 'pass': return 'bg-emerald-500 text-white';
+            case 'fail': return 'bg-red-500 text-white';
+            case 'analyzing': return 'bg-purple-500 text-white';
+            case 'na': return 'bg-slate-500 text-white';
+            default: return 'bg-amber-400 text-slate-900';
+        }
+    };
+
+    if (loading) {
+        return (
+            <DashboardLayout>
+                <div className={`h-full flex flex-col linear-app-bg`}>
+                    {/* Header Skeleton */}
+                    <div className={`flex items-center justify-between px-6 py-4 border-b border-[var(--border-default)] bg-[var(--background-elevated)]`}>
+                        <div className="flex items-center gap-4">
+                            <div className={`w-10 h-10 rounded-full animate-pulse bg-[var(--surface)]`} />
+                            <div className="space-y-2">
+                                <div className={`h-5 w-40 rounded animate-pulse bg-[var(--surface)]`} />
+                                <div className={`h-4 w-56 rounded animate-pulse bg-[var(--surface)]`} />
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-4">
+                            <div className={`h-4 w-24 rounded animate-pulse bg-[var(--surface)]`} />
+                            <div className={`h-10 w-32 rounded animate-pulse bg-[var(--surface)]`} />
+                        </div>
+                    </div>
+
+                    {/* Main Content Skeleton */}
+                    <div className="flex-1 flex overflow-hidden">
+                        {/* Center Area Skeleton */}
+                        <div className="flex-1 flex items-center justify-center bg-[var(--background-elevated)]">
+                            <div className="flex flex-col items-center gap-4">
+                                <div className={`w-64 h-64 rounded-lg animate-pulse bg-[var(--surface)]`} />
+                                <div className={`h-4 w-40 rounded animate-pulse bg-[var(--surface)]`} />
+                            </div>
+                        </div>
+
+                        {/* Right Sidebar Skeleton */}
+                        <div className={`w-96 flex flex-col border-l border-[var(--border-default)] bg-[var(--background-elevated)]`}>
+                            {/* Tab Navigation Skeleton */}
+                            <div className={`flex border-b border-[var(--border-default)]`}>
+                                <div className={`flex-1 py-3 flex justify-center`}>
+                                    <div className={`h-4 w-20 rounded animate-pulse bg-[var(--surface)]`} />
+                                </div>
+                                <div className={`flex-1 py-3 flex justify-center`}>
+                                    <div className={`h-4 w-20 rounded animate-pulse bg-[var(--surface)]`} />
+                                </div>
+                            </div>
+
+                            {/* Content Skeleton */}
+                            <div className="flex-1 p-6 space-y-3">
+                                {[...Array(4)].map((_, i) => (
+                                    <div key={i} className="flex items-center gap-4 p-2 rounded-lg border border-[var(--border-default)] animate-pulse">
+                                        <div className={`w-16 h-16 rounded-md bg-[var(--surface)]`} />
+                                        <div className="flex-1 space-y-2">
+                                            <div className={`h-4 w-24 rounded bg-[var(--surface)]`} />
+                                            <div className={`h-3 w-16 rounded bg-[var(--surface)]`} />
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </DashboardLayout>
+        );
+    }
+
+    if (!task) {
+        return (
+            <DashboardLayout>
+                <div className={`flex justify-center items-center h-full text-[var(--foreground-muted)]`}>
+                    Task not found
+                </div>
+            </DashboardLayout>
+        );
+    }
+
+    return (
+        <DashboardLayout>
+            <div className={`h-full flex flex-col linear-app-bg`}>
+                {/* Header */}
+                <div className={`flex items-center justify-between px-6 py-4 border-b border-[var(--border-default)] bg-[var(--background-elevated)]`}>
+                    <div className="flex items-center gap-4">
+                        <button
+                            onClick={() => navigate('/my-tasks')}
+                            className={`p-2 rounded-full transition-all hover:bg-[var(--surface)] text-[var(--foreground-muted)] hover:text-[var(--foreground)]`}
+                        >
+                            <ArrowLeft size={20} />
+                        </button>
+                        <div>
+                            <h1 className={`text-lg font-semibold tracking-tight text-[var(--foreground)]`}>
+                                Work Verification
+                            </h1>
+                            <p className={`text-sm text-[var(--foreground-muted)]`}>
+                                {task.title}
+                            </p>
+                        </div>
+                    </div>
+                    <div className="flex items-center gap-4">
+                        <span className={`text-sm font-medium text-[var(--foreground-muted)]`}>
+                            {capturedImages.length} image{capturedImages.length !== 1 ? 's' : ''} uploaded
+                        </span>
+                        <Button
+                            onClick={() => fileInputRef.current?.click()}
+                            disabled={submitting}
+                            variant="outline"
+                            className="px-4 font-medium tracking-wide"
+                        >
+                            ADD FILES
+                        </Button>
+                        <Button
+                            onClick={handleSubmitWork}
+                            disabled={capturedImages.length === 0 || submitting}
+                            className="px-6 font-medium tracking-wide bg-[var(--accent)] hover:bg-[var(--accent-bright)]"
+                        >
+                            {submitting ? 'SUBMITTING...' : 'SUBMIT WORK'}
+                        </Button>
+                    </div>
+                </div>
+
+                {/* Main Content */}
+                <div className="flex-1 flex overflow-hidden">
+                    {/* Image View - Center */}
+                    <div className="flex-1 flex flex-col relative">
+                        <div className="absolute inset-0 flex items-center justify-center bg-[var(--background-elevated)]">
+                            {viewMode === 'before' && selectedImageIndex !== null && task?.beforeImages?.[selectedImageIndex] ? (
+                                <img
+                                    src={task.beforeImages[selectedImageIndex]}
+                                    alt="Before"
+                                    className="w-full h-full object-contain"
+                                />
+                            ) : viewMode === 'after' && selectedImageIndex !== null && capturedImages[selectedImageIndex] ? (
+                                capturedImages[selectedImageIndex].mediaType === 'video' ? (
+                                    <video
+                                        src={capturedImages[selectedImageIndex].src}
+                                        controls
+                                        className="w-full h-full object-contain"
+                                    />
+                                ) : (
+                                    <img
+                                        src={capturedImages[selectedImageIndex].src}
+                                        alt="After"
+                                        className="w-full h-full object-contain"
+                                    />
+                                )
+                            ) : viewMode === 'ai' && selectedImageIndex !== null && aiResults?.details?.[selectedImageIndex] ? (
+                                <div className="w-full h-full flex flex-col items-center justify-center p-4">
+                                    {/* Debug logging */}
+                                    {(() => {
+                                        const detail = aiResults.details[selectedImageIndex];
+                                        console.log(`[WorkVerification] Rendering AI result ${selectedImageIndex}`);
+                                        console.log(`[WorkVerification] Status: ${detail.status}`);
+                                        return null;
+                                    })()}
+
+                                    {aiResults.details[selectedImageIndex].status === 'success' ? (
+                                        <div className="relative w-full h-full flex gap-4">
+                                            {/* Before Image with Bounding Box */}
+                                            <div className="flex-1 flex flex-col">
+                                                <p className="text-center mb-2 font-medium text-[var(--foreground)]">
+                                                    Before (Defect Detected)
+                                                </p>
+                                                <div className="flex-1 relative bg-black/5 rounded-lg overflow-hidden">
+                                                    <ImageWithBoundingBox
+                                                        src={aiResults.details[selectedImageIndex].before_image}
+                                                        alt="Before"
+                                                        bbox={aiResults.details[selectedImageIndex].bbox}
+                                                        boxColor="orange"
+                                                        label="DEFECT"
+                                                        className="absolute inset-0 w-full h-full"
+                                                    />
+                                                </div>
+                                                <p className="text-center mt-2 text-sm text-[var(--foreground-muted)]">
+                                                    {aiResults.details[selectedImageIndex].description || 'Defect detected'}
+                                                </p>
+                                            </div>
+
+                                            {/* After Image with Bounding Box */}
+                                            <div className="flex-1 flex flex-col">
+                                                <p className="text-center mb-2 font-medium text-[var(--foreground)]">
+                                                    After ({aiResults.details[selectedImageIndex].phase2_deep_learning?.verdict || 'Analyzed'})
+                                                </p>
+                                                <div className="flex-1 relative bg-black/5 rounded-lg overflow-hidden">
+                                                    <ImageWithBoundingBox
+                                                        src={aiResults.details[selectedImageIndex].after_image}
+                                                        alt="After"
+                                                        bbox={aiResults.details[selectedImageIndex].bbox}
+                                                        boxColor={aiResults.details[selectedImageIndex].phase2_deep_learning?.is_fixed ? 'green' : 'red'}
+                                                        label={aiResults.details[selectedImageIndex].phase2_deep_learning?.verdict}
+                                                        sublabel={`${Math.round((aiResults.details[selectedImageIndex].phase2_deep_learning?.confidence || 0) * 100)}%`}
+                                                        className="absolute inset-0 w-full h-full"
+                                                    />
+                                                </div>
+                                                <p className={`text-center mt-2 text-sm font-semibold ${aiResults.details[selectedImageIndex].phase2_deep_learning?.is_fixed
+                                                    ? 'text-emerald-500'
+                                                    : 'text-red-500'
+                                                    }`}>
+                                                    Confidence: {Math.round((aiResults.details[selectedImageIndex].phase2_deep_learning?.confidence || 0) * 100)}%
+                                                </p>
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <div className={`flex flex-col items-center justify-center p-8 rounded-lg border ${aiResults.details[selectedImageIndex].status === 'no_defect'
+                                            ? 'border-amber-500/50 bg-amber-500/10'
+                                            : 'border-red-500/50 bg-red-500/10'
+                                            }`}>
+                                            <h3 className={`text-lg font-bold mb-2 ${aiResults.details[selectedImageIndex].status === 'no_defect' ? 'text-amber-500' : 'text-red-500'
+                                                }`}>
+                                                {aiResults.details[selectedImageIndex].status === 'no_defect' ? 'No Defect Detected' : 'AI Analysis Failed'}
+                                            </h3>
+                                            <p className="text-center text-[var(--foreground)]">
+                                                {aiResults.details[selectedImageIndex].message || 'Unknown error occurred during analysis'}
+                                            </p>
+                                            <p className="text-sm text-slate-500 mt-4">
+                                                Status: {aiResults.details[selectedImageIndex].status}
+                                            </p>
+                                        </div>
+                                    )}
+                                </div>
+                            ) : (
+                                <div className="flex flex-col items-center justify-center max-w-md mx-auto text-center p-8">
+                                    <div className="space-y-6">
+                                        <div className="space-y-2">
+                                            <h3 className="text-xl font-medium text-[var(--foreground)]">
+                                                Upload Evidence
+                                            </h3>
+                                            <p className={`text-sm text-[var(--foreground-muted)]`}>
+                                                Upload photos or videos of the completed work to verify task completion.
+                                            </p>
+                                        </div>
+                                        <div className="flex items-center gap-4 justify-center">
+                                            <Button
+                                                onClick={() => fileInputRef.current?.click()}
+                                                className="bg-[var(--accent)] hover:bg-[var(--accent-bright)]"
+                                            >
+
+                                                UPLOAD FILES
+                                            </Button>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            <input
+                                ref={fileInputRef}
+                                type="file"
+                                accept="image/*,video/mp4,video/quicktime,video/webm,video/x-msvideo"
+                                multiple
+                                className="hidden"
+                                onChange={handleFileUpload}
+                            />
+                        </div>
+                    </div>
+
+                    {/* Right Panel - Sidebar */}
+                    <div className={`w-96 flex flex-col border-l border-[var(--border-default)] bg-[var(--background-elevated)]`}>
+                        {/* Tab Navigation */}
+                        <div className={`flex border-b border-[var(--border-default)]`}>
+                            <button
+                                onClick={() => setActiveTab('reference')}
+                                className={`flex-1 py-3 text-xs font-bold tracking-wider border-b-2 transition-colors ${activeTab === 'reference'
+                                    ? 'border-[var(--border-accent)] text-[var(--accent)]'
+                                    : 'border-transparent text-slate-500 hover:text-slate-400'
+                                    }`}
+                            >
+                                REFERENCE
+                            </button>
+                            <button
+                                onClick={() => setActiveTab('verification')}
+                                className={`flex-1 py-3 text-xs font-bold tracking-wider border-b-2 transition-colors ${activeTab === 'verification'
+                                    ? 'border-[var(--border-accent)] text-[var(--accent)]'
+                                    : 'border-transparent text-slate-500 hover:text-slate-400'
+                                    }`}
+                            >
+                                UPLOADED
+                            </button>
+                            {aiResults && (
+                                <button
+                                    onClick={() => setActiveTab('ai')}
+                                    className={`flex-1 py-3 text-xs font-bold tracking-wider border-b-2 transition-colors ${activeTab === 'ai'
+                                        ? 'border-[var(--border-accent)] text-[var(--accent)]'
+                                        : 'border-transparent text-slate-500 hover:text-slate-400'
+                                        }`}
+                                >
+                                    AI RESULTS
+                                </button>
+                            )}
+                        </div>
+
+                        {/* Tab Content */}
+                        <div className="flex-1 flex flex-col min-h-0">
+                            {/* Reference Tab */}
+                            {activeTab === 'reference' && (
+                                <div className="flex-1 flex flex-col min-h-0">
+                                    <div className="px-6 pt-4 pb-2">
+                                        <div className={`text-xs font-medium text-[var(--foreground-muted)]`}>
+                                            {task.beforeImages?.length || 0} Reference Images
+                                        </div>
+                                    </div>
+                                    <CustomScrollbar className="flex-1">
+                                        <div className="px-6 pb-4 space-y-3">
+                                            {task.beforeImages && task.beforeImages.length > 0 ? (
+                                                task.beforeImages.map((img, index) => (
+                                                    <div
+                                                        key={`before-${index}`}
+                                                        onClick={() => {
+                                                            if (viewMode === 'before' && selectedImageIndex === index) {
+                                                                setSelectedImageIndex(null);
+                                                            } else {
+                                                                setViewMode('before');
+                                                                setSelectedImageIndex(index);
+                                                            }
+                                                        }}
+                                                        className={`group flex items-center gap-4 p-2 rounded-lg cursor-pointer transition-all border ${viewMode === 'before' && selectedImageIndex === index
+                                                            ? 'border-[var(--border-accent)] bg-[color:rgba(94,106,210,0.10)]'
+                                                            : 'border-[var(--border-default)] hover:border-[var(--border-hover)] hover:bg-[var(--surface)]'
+                                                            }`}
+                                                    >
+                                                        <div className="w-16 h-16 rounded-md overflow-hidden bg-slate-100 dark:bg-slate-800 flex-shrink-0">
+                                                            <img
+                                                                src={img}
+                                                                alt={`Before ${index + 1}`}
+                                                                className="w-full h-full object-cover transition-transform group-hover:scale-105"
+                                                            />
+                                                        </div>
+                                                        <div className="flex-1 min-w-0">
+                                                            <p className={`text-sm font-medium truncate text-[var(--foreground)]`}>
+                                                                Image {index + 1}
+                                                            </p>
+                                                            <p className={`text-xs text-[var(--foreground-muted)]`}>
+                                                                Original State
+                                                            </p>
+                                                        </div>
+                                                        <ChevronRight size={16} className={`opacity-0 group-hover:opacity-100 transition-opacity text-[var(--foreground-muted)]`} />
+                                                    </div>
+                                                ))
+                                            ) : (
+                                                <div className="text-center py-8 border-2 border-dashed rounded-lg border-[var(--border-default)] text-[var(--foreground-muted)]">
+                                                    <p className="text-sm">No reference images</p>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </CustomScrollbar>
+                                </div>
+                            )}
+
+                            {/* Verification Tab */}
+                            {activeTab === 'verification' && (
+                                <div className="flex-1 flex flex-col min-h-0">
+                                    <div className="px-6 pt-4 pb-2">
+                                        <div className={`text-xs font-medium text-[var(--foreground-muted)]`}>
+                                            {capturedImages.length} Uploaded Images
+                                        </div>
+                                    </div>
+                                    <CustomScrollbar className="flex-1">
+                                        <div className="px-6 pb-4 space-y-3">
+                                            {capturedImages.length > 0 ? (
+                                                capturedImages.map((img, index) => (
+                                                    <div
+                                                        key={img.id}
+                                                        onClick={() => {
+                                                            setViewMode('after');
+                                                            setSelectedImageIndex(index);
+                                                        }}
+                                                        className={`group flex items-center gap-4 p-2 rounded-lg cursor-pointer transition-all border ${viewMode === 'after' && selectedImageIndex === index
+                                                            ? 'border-[var(--border-accent)] bg-[color:rgba(94,106,210,0.10)]'
+                                                            : 'border-[var(--border-default)] hover:border-[var(--border-hover)] hover:bg-[var(--surface)]'
+                                                            }`}
+                                                    >
+                                                        <div className="w-16 h-16 rounded-md overflow-hidden bg-slate-100 dark:bg-slate-800 flex-shrink-0 relative">
+                                                            {img.mediaType === 'video' ? (
+                                                                <>
+                                                                    <video
+                                                                        src={img.src}
+                                                                        className="w-full h-full object-cover"
+                                                                        muted
+                                                                    />
+                                                                    <div className="absolute inset-0 flex items-center justify-center bg-black/30">
+                                                                        <div className="w-6 h-6 rounded-full bg-white/80 flex items-center justify-center">
+                                                                            <div className="w-0 h-0 border-t-[5px] border-t-transparent border-l-[8px] border-l-slate-700 border-b-[5px] border-b-transparent ml-0.5" />
+                                                                        </div>
+                                                                    </div>
+                                                                </>
+                                                            ) : (
+                                                                <img
+                                                                    src={img.src}
+                                                                    alt={`Uploaded ${index + 1}`}
+                                                                    className="w-full h-full object-cover transition-transform group-hover:scale-105"
+                                                                />
+                                                            )}
+                                                        </div>
+                                                        <div className="flex-1 min-w-0">
+                                                            <div className="flex items-center gap-2">
+                                                                <p className={`text-sm font-medium truncate text-[var(--foreground)]`}>
+                                                                    {img.mediaType === 'video' ? 'Video' : 'Image'} {index + 1}
+                                                                </p>
+                                                                <span className={`px-2 py-0.5 rounded text-xs font-semibold ${getStatusBadge(img.status)}`}>
+                                                                    {img.status.toUpperCase()}
+                                                                </span>
+                                                            </div>
+                                                        </div>
+                                                        {/* Only show delete button if AI results haven't been generated */}
+                                                        {!aiResults && (
+                                                            <button
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    removeImage(img.id);
+                                                                }}
+                                                                className="p-1.5 rounded-full bg-red-500 text-white hover:bg-red-600 transition-colors"
+                                                            >
+                                                                <X size={14} />
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                ))
+                                            ) : (
+                                                <div className="flex flex-col items-center justify-center py-12 border-2 border-dashed rounded-lg border-[var(--border-default)] text-[var(--foreground-muted)]">
+                                                    <ImageIcon size={24} className="mb-2 opacity-50" />
+                                                    <p className="text-sm">No images uploaded</p>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </CustomScrollbar>
+                                </div>
+                            )}
+
+                            {/* AI Results Tab */}
+                            {activeTab === 'ai' && aiResults && aiResults.details && (
+                                <div className="flex-1 flex flex-col min-h-0">
+                                    <div className="px-6 pt-4 pb-2">
+                                        <span className={`inline-block px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider mb-2 ${aiResults.verdict === 'FIXED' ? 'bg-emerald-500 text-white' :
+                                            aiResults.verdict === 'PARTIAL' ? 'bg-amber-500 text-white' :
+                                                aiResults.verdict === 'NO_DEFECT' ? 'bg-blue-500 text-white' :
+                                                    'bg-red-500 text-white'
+                                            }`}>
+                                            VERDICT: {aiResults.verdict}
+                                        </span>
+                                        <div className={`text-xs font-medium text-[var(--foreground-muted)]`}>
+                                            {aiResults.summary || `${aiResults.details?.length || 0} Defects Analyzed`}
+                                        </div>
+                                    </div>
+                                    <CustomScrollbar className="flex-1">
+                                        <div className="px-6 pb-4 space-y-3">
+                                            {aiResults.details.map((detail: any, index: number) => (
+                                                <div
+                                                    key={`ai-${index}`}
+                                                    onClick={() => {
+                                                        setViewMode('ai');
+                                                        setSelectedImageIndex(index);
+                                                    }}
+                                                    className={`group flex items-center gap-4 p-2 rounded-lg cursor-pointer transition-all border ${viewMode === 'ai' && selectedImageIndex === index
+                                                        ? 'border-purple-500/50 bg-purple-500/10'
+                                                        : 'border-[var(--border-default)] hover:border-[var(--border-hover)] hover:bg-[var(--surface)]'
+                                                        }`}
+                                                >
+                                                    <div className="w-16 h-16 rounded-md overflow-hidden bg-slate-100 dark:bg-slate-800 flex-shrink-0 relative">
+                                                        {detail.after_image ? (
+                                                            <img
+                                                                src={detail.after_image}
+                                                                alt={`AI Result ${index + 1}`}
+                                                                className="w-full h-full object-cover transition-transform group-hover:scale-105"
+                                                            />
+                                                        ) : (
+                                                            <div className="w-full h-full flex items-center justify-center bg-slate-200 dark:bg-slate-700">
+                                                                <span className="text-xs text-slate-500">No Img</span>
+                                                            </div>
+                                                        )}
+                                                        <div className={`absolute bottom-0 left-0 right-0 h-1 ${detail.phase2_deep_learning?.verdict === 'FIXED' ? 'bg-emerald-500' :
+                                                            detail.status === 'error' ? 'bg-red-500' : 'bg-amber-500'
+                                                            }`} />
+                                                    </div>
+                                                    <div className="flex-1 min-w-0">
+                                                        <p className={`text-sm font-medium truncate text-[var(--foreground)]`}>
+                                                            {detail.description || `Defect ${index + 1}`}
+                                                        </p>
+                                                        <p className={`text-xs ${detail.phase2_deep_learning?.verdict === 'FIXED'
+                                                            ? 'text-emerald-500'
+                                                            : 'text-red-500'
+                                                            }`}>
+                                                            {detail.phase2_deep_learning?.verdict} ({Math.round((detail.phase2_deep_learning?.confidence || 0) * 100)}%)
+                                                        </p>
+                                                    </div>
+                                                    <ChevronRight size={16} className={`opacity-0 group-hover:opacity-100 transition-opacity text-[var(--foreground-muted)]`} />
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </CustomScrollbar>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </DashboardLayout>
+    );
+};
+

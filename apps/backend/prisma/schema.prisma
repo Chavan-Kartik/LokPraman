@@ -1,0 +1,206 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ==================== ENUMS ====================
+
+enum Role {
+  CLIENT  // Posts tasks and pays
+  WORKER  // Completes tasks
+  ADMIN   // Resolves disputes
+}
+
+enum TaskStatus {
+  OPEN           // Posted, awaiting worker
+  ACCEPTED       // Worker claimed it
+  EN_ROUTE       // Worker is traveling to the location
+  ARRIVED        // Worker has arrived at location, can start work
+  IN_PROGRESS    // Before image uploaded, work started
+  SUBMITTED      // After image uploaded, AI verifying
+  VERIFIED       // AI approved
+  PAID           // Funds released to worker
+  DISPUTED       // Client disputed
+  CANCELLED      // Task cancelled
+}
+
+enum WorkspaceRole {
+  OWNER    // Full control, can delete workspace
+  ADMIN    // Can manage members and tasks
+  MEMBER   // Can view and work on assigned tasks
+}
+
+enum InviteStatus {
+  PENDING   // Invitation sent, waiting for response
+  ACCEPTED  // User accepted the invitation
+  REJECTED  // User rejected the invitation
+}
+
+// ==================== MODELS ====================
+
+model User {
+  id              String   @id @default(uuid())
+  email           String   @unique
+  password        String
+  name            String
+  role            Role
+  
+  // Wallet & Payment
+  walletAddress   String?  @unique  // For blockchain audit trail
+  stripeAccountId String?  @unique  // For receiving payments (workers)
+  
+  // Reputation
+  rating          Float    @default(0)
+  ratingCount     Int      @default(0)
+  completedTasks  Int      @default(0)
+  
+  // Firebase Cloud Messaging for push notifications
+  fcmToken        String?
+
+  // Current active workspace (for quick switching)
+  activeWorkspaceId String?
+  
+  // Relations
+  clientTasks     Task[]   @relation("ClientTasks")
+  workerTasks     Task[]   @relation("WorkerTasks")
+  workspaces      WorkspaceMember[]
+  ownedWorkspaces Workspace[] @relation("WorkspaceOwner")
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([email])
+  @@index([role])
+  @@index([stripeAccountId])
+}
+
+model Workspace {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  logo        String?  // URL to workspace logo
+  
+  // Owner
+  ownerId     String
+  owner       User     @relation("WorkspaceOwner", fields: [ownerId], references: [id])
+  
+  // Relations
+  members     WorkspaceMember[]
+  tasks       Task[]
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([ownerId])
+}
+
+model WorkspaceMember {
+  id          String        @id @default(uuid())
+  
+  // Relations
+  userId      String
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspaceId String
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  
+  // Role in this workspace
+  role        WorkspaceRole @default(MEMBER)
+  
+  // Invitation tracking
+  inviteStatus InviteStatus @default(PENDING)
+  invitedById  String?      // Who sent the invitation
+  invitedAt    DateTime     @default(now())
+  joinedAt     DateTime?    // When they accepted
+  respondedAt  DateTime?    // When they responded (accept/reject)
+  
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@unique([userId, workspaceId])
+  @@index([userId])
+  @@index([workspaceId])
+  @@index([inviteStatus])
+}
+
+model Task {
+  id              String     @id @default(uuid())
+  title           String
+  description     String
+  category        String     // "repair", "cleaning", "delivery", etc.
+  budget          Float      // Amount in INR
+  
+  // Parties
+  clientId        String
+  client          User       @relation("ClientTasks", fields: [clientId], references: [id])
+  workerId        String?
+  worker          User?      @relation("WorkerTasks", fields: [workerId], references: [id])
+  
+  // Workspace (optional - tasks can belong to a workspace)
+  workspaceId     String?
+  workspace       Workspace? @relation(fields: [workspaceId], references: [id])
+  
+  // Status
+  status          TaskStatus @default(OPEN)
+  
+  // Blockchain (Audit Trail Only - No Crypto)
+  contractAddress String?    // Not used for payments, just audit
+  blockchainTaskId String?   // Task ID hash on blockchain
+  
+  // Payment (Stripe - Real INR)
+  stripePaymentIntentId String?  // Stripe escrow
+  stripeTransferId      String?  // Stripe payment to worker
+  
+  // Work Evidence
+  beforeImages    String[]   @default([])  // Array of image URLs
+  beforeImageHashes Json?    // Array of SHA-256 hashes for blockchain verification
+  afterImageUrl   String?    // URL of after image (first one if multiple)
+  afterImageHash  String?    // SHA-256 for blockchain verification
+  workerImages    String[]   @default([])  // Images uploaded by worker before verification
+  workerImagesUploadedAt DateTime?  // When worker uploaded images
+  
+  // Public Review
+  publicRating      Float?
+  publicRatingCount Int        @default(0)
+  
+  // AI Verification
+  aiVerification  Json?      // Full AI result (confidence, verdict, etc.)
+  aiConfidence    Float?
+  aiVerdict       String?    // "FIXED" or "NOT_FIXED"
+  
+  // Location Verification (Google Maps)
+  requiresLocation Boolean   @default(false)
+  locationLat      Float?
+  locationLng      Float?
+  locationRadius   Int?      // meters
+  locationName     String?   // "123 Main St, City"
+  workerStartLat   Float?    // Worker's location when starting
+  workerStartLng   Float?
+  locationVerified Boolean   @default(false)
+  
+  // Dispute
+  disputed        Boolean    @default(false)
+  disputeReason   String?
+  disputedAt      DateTime?
+  disputeDeadline DateTime?  // 24h from completion
+  
+  // Timestamps
+  createdAt       DateTime   @default(now())
+  acceptedAt      DateTime?
+  completedAt     DateTime?
+  paidAt          DateTime?
+  deadline        DateTime?  // Task deadline set by client
+  acceptanceTime  DateTime?  // Task acceptance deadline
+  updatedAt       DateTime   @updatedAt
+
+  @@index([clientId])
+  @@index([workerId])
+  @@index([workspaceId])
+  @@index([status])
+  @@index([category])
+}
+

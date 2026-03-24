@@ -1,0 +1,42 @@
+# Turborepo & Node
+node_modules
+dist
+.turbo
+.DS_Store
+coverage
+/docs
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+venv2/
+venv3/
+env/
+.pytest_cache/
+
+# Hardhat / Solidity
+artifacts/
+cache/
+typechain-types/
+
+# Expo / React Native
+.expo/
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.orig.*
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*

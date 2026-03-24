@@ -1,0 +1,605 @@
+import React, { useState } from 'react';
+import { Button } from '../ui/Button';
+import { Input } from '../ui/Input';
+import { DatePicker } from '../ui/DatePicker';
+import { useTheme } from '../../contexts/ThemeContext';
+import { Trash2, Check, Sparkles } from 'lucide-react';
+import type { Task } from '../../services/api';
+import { tasksAPI } from '../../services/api';
+import axios from 'axios';
+import toast from 'react-hot-toast';
+import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api';
+
+interface CreateProjectModalProps {
+    onClose: () => void;
+    onSuccess: () => void;
+    editTask?: Task;
+}
+
+export const CreateProjectModal: React.FC<CreateProjectModalProps> = ({ onClose, onSuccess, editTask }) => {
+    const { theme } = useTheme();
+    const [currentStep, setCurrentStep] = useState(1);
+    const [formData, setFormData] = useState({
+        title: editTask?.title || '',
+        description: editTask?.description || '',
+        fundingGoal: editTask?.budget?.toString() || '',
+        deadline: editTask?.deadline?.split('T')[0] || '',
+        scheduledTime: editTask?.deadline ? new Date(editTask.deadline).toTimeString().slice(0, 5) : '',
+        locationName: editTask?.locationName || '',
+        locationLat: 0,
+        locationLng: 0,
+    });
+    const [loading, setLoading] = useState(false);
+    const [enhancing, setEnhancing] = useState(false);
+    const [descriptionError, setDescriptionError] = useState('');
+    // Track existing image URLs (from editTask) separately from new files
+    const [existingImages, setExistingImages] = useState<string[]>(editTask?.beforeImages || []);
+    const [imageFiles, setImageFiles] = useState<File[]>([]);
+    const [newImagePreviews, setNewImagePreviews] = useState<string[]>([]);
+
+    const steps = [
+        { number: 1, title: 'Basic Info', description: 'Title and description' },
+        { number: 2, title: 'Media', description: 'Upload task image' },
+        { number: 3, title: 'Location', description: 'Set task location' },
+        { number: 4, title: 'Budget', description: 'Set budget & deadline' },
+    ];
+
+    const handleNext = () => {
+        if (currentStep === 1) {
+            if (!formData.title.trim()) {
+                alert('Please enter a title');
+                return;
+            }
+            const wordCount = formData.description.trim().split(/\s+/).filter(word => word.length > 0).length;
+            if (wordCount < 10) {
+                setDescriptionError(`Description must be at least 10 words (currently ${wordCount} words)`);
+                return;
+            }
+        } else if (currentStep === 2) {
+            // Check total images (existing + new)
+            const totalImages = existingImages.length + imageFiles.length;
+            if (totalImages === 0) {
+                alert('Please upload at least one image');
+                return;
+            }
+        } else if (currentStep === 3) {
+            if (!formData.locationName.trim()) {
+                alert('Please provide a location');
+                return;
+            }
+        }
+
+        if (currentStep < 4) {
+            setCurrentStep(currentStep + 1);
+        }
+    };
+
+    const handleBack = () => {
+        if (currentStep > 1) {
+            setCurrentStep(currentStep - 1);
+        }
+    };
+
+    const handleSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+
+        if (!formData.fundingGoal) {
+            alert('Please enter a budget');
+            return;
+        }
+
+        if (!formData.deadline) {
+            alert('Please select a scheduled date');
+            return;
+        }
+
+        if (!formData.scheduledTime) {
+            alert('Please select a scheduled time');
+            return;
+        }
+
+        setLoading(true);
+
+
+        try {
+            const token = localStorage.getItem('token');
+
+            const submitData = new FormData();
+            submitData.append('title', formData.title);
+            submitData.append('description', formData.description);
+            submitData.append('category', 'general');
+            submitData.append('budget', formData.fundingGoal);
+            submitData.append('locationName', formData.locationName);
+            if (formData.locationLat) submitData.append('locationLat', formData.locationLat.toString());
+            if (formData.locationLng) submitData.append('locationLng', formData.locationLng.toString());
+            if (formData.deadline && formData.scheduledTime) {
+                // Combine date and time into ISO datetime string
+                const deadlineDateTime = `${formData.deadline}T${formData.scheduledTime}:00.000Z`;
+                submitData.append('deadline', deadlineDateTime);
+            }
+            // Append all new image files
+            imageFiles.forEach((file) => {
+                submitData.append('beforeImages', file);
+            });
+            // Send existing image URLs to keep (for edits)
+            if (editTask && existingImages.length > 0) {
+                submitData.append('existingImages', JSON.stringify(existingImages));
+            }
+
+            const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+            const url = editTask
+                ? `${apiUrl}/v0/tasks/${editTask.id}`
+                : `${apiUrl}/v0/tasks`;
+
+            const method = editTask ? 'put' : 'post';
+
+            await axios[method](
+                url,
+                submitData,
+                {
+                    headers: {
+                        Authorization: `Bearer ${token}`,
+                        'Content-Type': 'multipart/form-data',
+                    },
+                }
+            );
+
+            onSuccess();
+            onClose();
+        } catch (error) {
+            console.error('Failed to Create Task:', error);
+            alert('Failed to Create Task');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+        setFormData({
+            ...formData,
+            [e.target.name]: e.target.value,
+        });
+
+        if (e.target.name === 'description') {
+            const wordCount = e.target.value.trim().split(/\s+/).filter(word => word.length > 0).length;
+            if (wordCount < 10) {
+                setDescriptionError(`Description must be at least 10 words (currently ${wordCount} words)`);
+            } else {
+                setDescriptionError('');
+            }
+        }
+    };
+
+    const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const files = e.target.files;
+        if (files && files.length > 0) {
+            const newFiles = Array.from(files);
+            setImageFiles(prev => [...prev, ...newFiles]);
+
+            // Generate previews for new files
+            newFiles.forEach(file => {
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                    setNewImagePreviews(prev => [...prev, reader.result as string]);
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+    };
+
+    const removeExistingImage = (index: number) => {
+        setExistingImages(prev => prev.filter((_, i) => i !== index));
+    };
+
+    const removeNewImage = (index: number) => {
+        setImageFiles(prev => prev.filter((_, i) => i !== index));
+        setNewImagePreviews(prev => prev.filter((_, i) => i !== index));
+    };
+
+    const handleEnhanceDescription = async () => {
+        if (!formData.description.trim()) {
+            toast.error('Please enter a description first');
+            return;
+        }
+
+        setEnhancing(true);
+        try {
+            const response = await tasksAPI.enhanceDescription(formData.description);
+            setFormData({ ...formData, description: response.data.enhancedDescription });
+            toast.success('Description enhanced successfully!');
+        } catch (error: any) {
+            console.error('Enhancement error:', error);
+            toast.error(error.response?.data?.message || 'Failed to enhance description');
+        } finally {
+            setEnhancing(false);
+        }
+    };
+
+    const { isLoaded } = useJsApiLoader({
+        id: 'google-map-script',
+        googleMapsApiKey: import.meta.env.VITE_GOOGLE_MAPS_API_KEY || ''
+    });
+
+    const [mapCenter] = useState({ lat: 18.5204, lng: 73.8567 }); // Default to Pune
+    const [markerPosition, setMarkerPosition] = useState<{ lat: number; lng: number } | null>(null);
+
+    const onMapClick = async (e: google.maps.MapMouseEvent) => {
+        if (e.latLng) {
+            const lat = e.latLng.lat();
+            const lng = e.latLng.lng();
+            setMarkerPosition({ lat, lng });
+
+            // Reverse geocode
+            try {
+                const response = await fetch(
+                    `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${import.meta.env.VITE_GOOGLE_MAPS_API_KEY}`
+                );
+                const data = await response.json();
+                if (data.status === 'OK' && data.results[0]) {
+                    setFormData({
+                        ...formData,
+                        locationName: data.results[0].formatted_address,
+                        locationLat: lat,
+                        locationLng: lng
+                    });
+                }
+            } catch (error) {
+                console.error('Reverse geocoding failed', error);
+                toast.error('Failed to get address from pin');
+                // Still save coordinates even if geocoding fails
+                setFormData(prev => ({
+                    ...prev,
+                    locationLat: lat,
+                    locationLng: lng
+                }));
+            }
+        }
+    };
+
+    const handleDateChange = (date: string) => {
+        setFormData({
+            ...formData,
+            deadline: date,
+        });
+    };
+
+    return (
+        <div className="flex min-h-[500px]">
+            {/* Left Sidebar - Steps */}
+            <div className="w-56 pr-6 border-r border-[var(--border-default)]">
+                <div className="relative">
+                    {steps.map((step, index) => (
+                        <div key={step.number} className="relative flex gap-4 pb-8 last:pb-0">
+                            {/* Vertical line */}
+                            {index < steps.length - 1 && (
+                                <div
+                                    className={`absolute left-3 top-7 w-0.5 h-full ${currentStep > step.number
+                                        ? 'bg-[#464ace]'
+                                        : 'bg-[var(--border-hover)]'
+                                        }`}
+                                    style={{ borderStyle: currentStep > step.number ? 'solid' : 'dashed' }}
+                                />
+                            )}
+
+                            {/* Step indicator */}
+                            <div className={`relative z-10 w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 ${currentStep > step.number
+                                ? 'bg-[#464ace] text-white'
+                                : currentStep === step.number
+                                    ? 'bg-[#464ace] text-white'
+                                    : 'bg-[var(--background-elevated)] border-2 border-[var(--border-default)]'
+                                }`}>
+                                {currentStep > step.number ? (
+                                    <Check size={14} />
+                                ) : (
+                                    <span className={`text-xs font-medium ${currentStep === step.number
+                                        ? 'text-white'
+                                        : 'text-[var(--foreground-muted)]'
+                                        }`}>
+                                        {step.number}
+                                    </span>
+                                )}
+                            </div>
+
+                            {/* Step text */}
+                            <div className="pt-0.5">
+                                <p className={`text-sm font-semibold ${currentStep >= step.number
+                                    ? 'text-[var(--foreground)]'
+                                    : 'text-[var(--foreground-muted)]'
+                                    }`}>
+                                    {step.title}
+                                </p>
+                                <p className="text-xs mt-0.5 text-[var(--foreground-muted)]">
+                                    {step.description}
+                                </p>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            </div>
+
+            {/* Right Content Area */}
+            <div className="flex-1 pl-8 flex flex-col">
+                {/* Step Title */}
+                <h3 className="text-lg font-semibold mb-6 text-[var(--foreground)]">
+                    {steps[currentStep - 1].title}
+                </h3>
+
+                <form onSubmit={handleSubmit} className="flex-1 flex flex-col">
+                    {/* Step 1: Basic Info */}
+                    {currentStep === 1 && (
+                        <div className="space-y-5">
+                            <div className="space-y-2">
+                                <label htmlFor="title" className="block text-sm font-medium text-[var(--foreground)]">
+                                    Task Title <span className="text-red-500">*</span>
+                                </label>
+                                <Input
+                                    id="title"
+                                    name="title"
+                                    type="text"
+                                    placeholder="Enter task title"
+                                    value={formData.title}
+                                    onChange={handleChange}
+                                />
+                            </div>
+
+                            <div className="space-y-2">
+                                <div className="flex items-center justify-between">
+                                    <label htmlFor="description" className="block text-sm font-medium text-[var(--foreground)]">
+                                        Description <span className="text-red-500">*</span>
+                                    </label>
+                                    <span className={`text-xs ${formData.description.trim().split(/\s+/).filter(word => word.length > 0).length >= 10
+                                        ? 'text-green-500'
+                                        : 'text-[var(--foreground-muted)]'}`}>
+                                        {formData.description.trim().split(/\s+/).filter(word => word.length > 0).length}/10 words
+                                    </span>
+                                </div>
+                                <textarea
+                                    id="description"
+                                    name="description"
+                                    rows={4}
+                                    placeholder="Describe your task in detail (minimum 10 words)"
+                                    value={formData.description}
+                                    onChange={handleChange}
+                                    className={`flex w-full rounded-md border border-[var(--border-default)] bg-[var(--background-elevated)] px-4 py-3 text-sm text-[var(--foreground)] placeholder:text-[var(--foreground-subtle)] focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 resize-none ${descriptionError ? 'border-red-500' : ''}`}
+                                />
+                                {descriptionError && (
+                                    <p className="text-xs text-red-500">{descriptionError}</p>
+                                )}
+                                <button
+                                    type="button"
+                                    onClick={handleEnhanceDescription}
+                                    disabled={enhancing || !formData.description.trim()}
+                                    className={`flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${enhancing || !formData.description.trim()
+                                        ? 'opacity-50 cursor-not-allowed'
+                                        : 'bg-[#464ace] hover:bg-[#3d42b8] text-white'
+                                        }`}
+                                >
+                                    <Sparkles size={16} className={enhancing ? 'animate-spin' : ''} />
+                                    {enhancing ? 'Enhancing...' : 'Enhance with AI'}
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Step 2: Media */}
+                    {currentStep === 2 && (
+                        <div className="space-y-4">
+                            {/* Upload Area */}
+                            <div className="border-2 border-dashed rounded-xl p-6 border-[var(--border-default)] bg-[var(--surface)]">
+                                <div className="flex flex-col items-center justify-center">
+                                    {/* Folder Icon */}
+                                    <div className="mb-4 text-[#464ace]">
+                                        <svg width="48" height="48" viewBox="0 0 24 24" fill="currentColor" opacity="0.9">
+                                            <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z" />
+                                        </svg>
+                                    </div>
+
+                                    <p className="text-sm mb-2 text-[var(--foreground)]">
+                                        Drag your file(s) to start uploading
+                                    </p>
+
+                                    <p className="text-xs mb-3 text-[var(--foreground-muted)]">
+                                        OR
+                                    </p>
+
+                                    <label className="cursor-pointer">
+                                        <span className="px-4 py-2 text-sm font-medium text-[#464ace] border border-[#464ace] rounded-md hover:bg-[#464ace]/10 transition-colors">
+                                            Browse files
+                                        </span>
+                                        <input
+                                            type="file"
+                                            className="hidden"
+                                            accept="image/*"
+                                            multiple
+                                            onChange={handleImageChange}
+                                        />
+                                    </label>
+                                </div>
+                            </div>
+
+                            {/* Format Support Text */}
+                            <p className="text-xs text-[var(--foreground-muted)]">
+                                Only support .jpg, .png and .svg and zip files
+                            </p>
+
+                            {/* Uploaded Files */}
+                            {(existingImages.length > 0 || newImagePreviews.length > 0) && (
+                                <div className="space-y-2">
+                                    <p className="text-sm font-medium text-[var(--foreground)]">
+                                        Uploaded Images ({existingImages.length + newImagePreviews.length})
+                                    </p>
+                                    <div className="grid grid-cols-4 gap-2">
+                                        {/* Existing Images */}
+                                        {existingImages.map((url: string, index: number) => (
+                                            <div key={`existing-${index}`} className="relative group">
+                                                <img
+                                                    src={url}
+                                                    alt={`Existing ${index + 1}`}
+                                                    className="w-full aspect-square object-contain rounded-lg bg-[var(--surface)]"
+                                                />
+                                                <button
+                                                    type="button"
+                                                    onClick={() => removeExistingImage(index)}
+                                                    className="absolute top-1 right-1 p-1 bg-red-500 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
+                                                >
+                                                    <Trash2 size={12} className="text-white" />
+                                                </button>
+                                            </div>
+                                        ))}
+                                        {/* New Images */}
+                                        {newImagePreviews.map((preview: string, index: number) => (
+                                            <div key={`new-${index}`} className="relative group">
+                                                <img
+                                                    src={preview}
+                                                    alt={`New ${index + 1}`}
+                                                    className="w-full aspect-square object-contain rounded-lg border-2 border-dashed border-green-500 bg-[var(--surface)]"
+                                                />
+                                                <button
+                                                    type="button"
+                                                    onClick={() => removeNewImage(index)}
+                                                    className="absolute top-1 right-1 p-1 bg-red-500 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
+                                                >
+                                                    <Trash2 size={12} className="text-white" />
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Step 3: Location */}
+                    {currentStep === 3 && (
+                        <div className="space-y-4">
+                            <div className="space-y-2">
+                                <label htmlFor="locationName" className="block text-sm font-medium text-[var(--foreground)]">
+                                    Location <span className="text-red-500">*</span>
+                                </label>
+                                <Input
+                                    id="locationName"
+                                    name="locationName"
+                                    type="text"
+                                    placeholder="Enter address"
+                                    value={formData.locationName}
+                                    onChange={handleChange}
+                                    className="flex-1"
+                                />
+                                <div className="space-y-2">
+                                    <p className="text-xs text-[var(--foreground-muted)]">
+                                        Click on the map to drop a pin at the task location.
+                                    </p>
+                                    {isLoaded ? (
+                                        <div className="rounded-xl overflow-hidden border border-[var(--border-default)]">
+                                            <GoogleMap
+                                                mapContainerStyle={{ width: '100%', height: '300px' }}
+                                                center={mapCenter}
+                                                zoom={13}
+                                                onClick={onMapClick}
+                                                options={{
+                                                    styles: theme === 'dark' ? [
+                                                        { elementType: 'geometry', stylers: [{ color: '#1e293b' }] },
+                                                        { elementType: 'labels.text.stroke', stylers: [{ color: '#1e293b' }] },
+                                                        { elementType: 'labels.text.fill', stylers: [{ color: '#94a3b8' }] },
+                                                        { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#334155' }] },
+                                                        { featureType: 'road', elementType: 'geometry.stroke', stylers: [{ color: '#475569' }] },
+                                                        { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#0f172a' }] },
+                                                        { featureType: 'poi', elementType: 'geometry', stylers: [{ color: '#334155' }] },
+                                                        { featureType: 'transit', elementType: 'geometry', stylers: [{ color: '#334155' }] },
+                                                    ] : [],
+                                                    streetViewControl: false,
+                                                    mapTypeControl: false,
+                                                    disableDefaultUI: true,
+                                                    zoomControl: true,
+                                                }}
+                                            >
+                                                {markerPosition && (
+                                                    <Marker position={markerPosition} />
+                                                )}
+                                            </GoogleMap>
+                                        </div>
+                                    ) : (
+                                        <div className="w-full h-[300px] bg-[var(--surface)] rounded-xl animate-pulse flex items-center justify-center">
+                                            <span className="text-[var(--foreground-muted)]">Loading Map...</span>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Step 4: Budget & Deadline */}
+                    {currentStep === 4 && (
+                        <div className="space-y-5">
+                            <div className="space-y-2">
+                                <label htmlFor="fundingGoal" className="block text-sm font-medium text-[var(--foreground)]">
+                                    Budget (₹) <span className="text-red-500">*</span>
+                                </label>
+                                <Input
+                                    id="fundingGoal"
+                                    name="fundingGoal"
+                                    type="text"
+                                    inputMode="numeric"
+                                    pattern="[0-9]*"
+                                    placeholder="Enter amount"
+                                    value={formData.fundingGoal}
+                                    onChange={(e) => {
+                                        const value = e.target.value.replace(/\D/g, '');
+                                        setFormData({ ...formData, fundingGoal: value });
+                                    }}
+                                />
+                            </div>
+
+                            <div className="space-y-2">
+                                <label htmlFor="deadline" className="block text-sm font-medium text-[var(--foreground)]">
+                                    Scheduled Date & Time <span className="text-red-500">*</span>
+                                </label>
+                                <div className="grid grid-cols-2 gap-3">
+                                    <DatePicker
+                                        value={formData.deadline}
+                                        onChange={handleDateChange}
+                                        placeholder="Select date"
+                                        required
+                                    />
+                                    <Input
+                                        id="scheduledTime"
+                                        name="scheduledTime"
+                                        type="time"
+                                        value={formData.scheduledTime}
+                                        onChange={handleChange}
+                                        placeholder="Select time"
+                                        required
+                                    />
+                                </div>
+                                <p className="text-xs text-[var(--foreground-muted)]">
+                                    When should this task be completed?
+                                </p>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Navigation Buttons */}
+                    <div className="flex justify-end gap-3 mt-auto pt-8">
+                        <Button
+                            type="button"
+                            variant="outline"
+                            onClick={currentStep === 1 ? onClose : handleBack}
+                        >
+                            {currentStep === 1 ? 'Cancel' : 'Back'}
+                        </Button>
+
+                        {currentStep < 4 ? (
+                            <Button type="button" onClick={handleNext}>
+                                Next
+                            </Button>
+                        ) : (
+                            <Button type="submit" disabled={loading}>
+                                {loading ? 'Creating...' : 'Create Task'}
+                            </Button>
+                        )}
+                    </div>
+                </form>
+            </div>
+        </div>
+    );
+};
